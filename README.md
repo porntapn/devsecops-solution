@@ -1,1 +1,1 @@
-# devsecops-solution
+# devsecop-solution
