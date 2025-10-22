@@ -4,6 +4,21 @@ const app = express();
 
 const port = 3000;
 
+// ฟังก์ชันสำหรับ Escape HTML (ป้องกัน XSS)
+// แก้ไข: ใช้ String#replaceAll() แทน String#replace() ตามคำแนะนำด้าน Code Quality ของ SonarQube
+const escapeHtml = (unsafe) => {
+  if (typeof unsafe !== 'string') {
+    return unsafe;
+  }
+  return unsafe
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+    .replaceAll('/', '&#x2F;');
+};
+
 // 1. [แก้ไขช่องโหว่ SAST/Code Smell] ไม่ควร Hardcode Secret
 // เปลี่ยนไปดึง Secret Key จาก Environment Variable
 // SonarQube จะไม่ตรวจจับเป็นช่องโหว่หลัก แต่แนะนำให้ใช้ Vault หรือ Key Management
@@ -12,12 +27,13 @@ const secretKey = process.env.APP_SECRET || 'fallback-secure-key';
 
 // 2. [แก้ไขช่องโหว่ Security] ลบฟังก์ชัน 'eval()' ที่อันตราย
 app.get('/safe-api', (req, res) => {
-  // รับข้อมูล แต่ห้ามนำไปรันเป็นโค้ด
+  // รับข้อมูล
   const user_input = req.query.data;
   
   // นำโค้ด eval(user_input) ออกเพื่อป้องกัน Code Injection
-  // เราแค่ส่งข้อมูลกลับไปอย่างปลอดภัย
-  res.send(`Data received safely: ${user_input}`);
+  // *** แก้ไข: ใช้ escapeHtml เพื่อส่งข้อมูลกลับไปอย่างปลอดภัย (ป้องกัน XSS) ***
+  const safe_output = escapeHtml(user_input);
+  res.send(`Data received safely: ${safe_output}`);
 });
 
 

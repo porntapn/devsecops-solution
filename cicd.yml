@@ -1,0 +1,134 @@
+name: DevSecOps CI/CD Pipeline to Azure
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+# ตั้งค่าสิทธิ์ที่จำเป็นทั้งหมด
+permissions:
+  contents: read
+  packages: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  build_and_scan:
+    name: 🛡️ Scan & Quality Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'app/package.json' 
+
+      # ติดตั้ง sonar-scanner globally เพื่อให้คำสั่ง npm run sonar ใช้งานได้
+      - name: Install Global Sonar Scanner
+        run: npm install -g sonar-scanner
+          
+      - name: Install App Dependencies
+        run: npm install --prefix app
+
+      # คำสั่งนี้จะใช้ 'jest --coverage' จาก package.json เพื่อสร้าง app/coverage/lcov.info
+      - name: Run Unit Tests and Generate Coverage Report (LCOV)
+        run: npx jest --coverage --config app/package.json --forceExit
+
+        
+      # 1. รัน SonarQube Scan
+      - name: SonarQube Scan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          # ใช้ sonar-scanner ที่ติดตั้งไว้ global
+          sonar-scanner \
+            -Dsonar.projectKey=kitthapat-j_devsecops-fullsolution \
+            -Dsonar.organization=kitthapat-j \
+            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }} \
+            -Dsonar.token=${{ secrets.SONAR_TOKEN }} \
+            -Dsonar.sources=app \
+            -Dsonar.javascript.lcov.reportPaths=app/coverage/lcov.info \
+            -Dsonar.coverage.exclusions=app/index.js
+
+      - name: Delay to ensure Quality Gate Status is ready
+        run: echo "Waiting for 30 seconds for SonarQube processing..." && sleep 30s            
+      # 2. Security Gate: ตรวจสอบ Quality Gate (ใช้ First-Party Action + Script)
+      - name: Check SonarQube Quality Gate Status
+        id: wait_and_check
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { checkQualityGate } = require('./.github/workflows/sonar-check-script.js');
+            // ส่งค่า Secrets ไปให้ script ใช้โดยตรง
+            await checkQualityGate({
+              github, 
+              core, 
+              fetch,
+              projectKey: 'kitthapat-j_devsecops-fullsolution'
+            });
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }} 
+          #client-id: ${{ secrets.AZURE_CLIENT_ID }} 
+          #tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          #subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          #service-principal-password: ${{ secrets.AZURE_CLIENT_SECRET }} testttt
+      - name: Create Azure Resources (App Service Plan and WebApp)
+        uses: azure/cli@v1    
+        with:
+          inlineScript: |
+            RESOURCE_GROUP="RG000"
+            APP_SERVICE_PLAN_NAME="${{ secrets.AZURE_WEBAPP_NAME }}-plan"
+            WEB_APP_NAME="${{ secrets.AZURE_WEBAPP_NAME }}"
+            LOCATION="westus"
+            NODE_RUNTIME="NODE|20-lts"
+
+            az appservice plan create \
+              --name $APP_SERVICE_PLAN_NAME \
+              --resource-group $RESOURCE_GROUP \
+              --location $LOCATION \
+              --is-linux \
+              --sku S1 --output none
+
+            echo "Checking and creating WebApp: $WEB_APP_NAME"
+            az webapp create \
+              --name $WEB_APP_NAME \
+              --resource-group $RESOURCE_GROUP \
+              --plan $APP_SERVICE_PLAN_NAME \
+              --runtime $NODE_RUNTIME \
+              --output none
+         
+      # สร้างไฟล์ ZIP ของแอปพลิเคชันเพื่อ Deploy
+      - name: Create Deployment Package
+      # บีบอัดเฉพาะโฟลเดอร์ app/ (ซึ่งมี index.js และ node_modules)
+        run: zip -r deploy_package.zip app/
+
+      - name: 'Deploy to Azure WebApp'
+        uses: azure/webapps-deploy@v2
+        with:
+          # การ Login โดยใช้ Service Principal JSON (ควรถูกจัดเก็บใน AZURE_CREDENTIALS secret)
+          #creds: ${{ secrets.AZURE_CREDENTIALS }}
+          # ชื่อ Azure App Service (ควรถูกจัดเก็บใน AZURE_WEBAPP_NAME secret)
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME }}
+          # โฟลเดอร์ที่ต้องการ Deploy
+          package: deploy_package.zip
+          # กำหนดให้ใช้ start command ใน package.json
+          startup-command: "node index.js"
+
